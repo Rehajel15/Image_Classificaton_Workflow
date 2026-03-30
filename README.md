@@ -1,1 +1,1 @@
-My own Framework to train an image classification model.
+My own framework to train an image classification model.

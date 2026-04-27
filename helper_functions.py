@@ -1,16 +1,34 @@
 from torchinfo import summary
+import torch
 from torch import nn, save, inference_mode, softmax, argmax
 from torch.utils.data import DataLoader
 from pathlib import Path
 from torch.utils.tensorboard.writer import SummaryWriter
 from datetime import datetime
 import os
+import random
+import time
 import requests
 import json
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, classification_report
 import numpy as np
+
+
+# ImageNet mean/std — default un-normalization values for torchvision pretrained models.
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def set_seed(seed: int = 42) -> None:
+    """Seed Python, NumPy, and PyTorch (CPU + CUDA) for reproducible training runs."""
+    print(f"----------- Setting seed to {seed} -----------\n")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 # Create summary function for a model
 def model_summary(model:nn.Module, input_size:dict) -> None:
@@ -84,10 +102,11 @@ def create_writer(experiment_name: str,
     return SummaryWriter(log_dir=log_dir)
 
 # Plots a confusion matrix
-def plot_confusion_matrix(model: nn.Module, 
-                          test_dataloader: DataLoader, 
-                          class_names: list, 
-                          device: str):
+def plot_confusion_matrix(model: nn.Module,
+                          test_dataloader: DataLoader,
+                          class_names: list,
+                          device: str,
+                          title: str = "Confusion Matrix"):
     """
     Evaluates the model on the test set and plots a confusion matrix.
     """
@@ -123,7 +142,7 @@ def plot_confusion_matrix(model: nn.Module,
                 xticklabels=class_names, 
                 yticklabels=class_names)
     
-    plt.title('Confusion Matrix: Finger Classification')
+    plt.title(title)
     plt.xlabel('Predicted Label')
     plt.ylabel('True Label')
     plt.show()
@@ -157,68 +176,84 @@ def send_notification(topic, message, title="Python Alert"):
         print(f"An error occurred while sending: {e}")
 
 # Waits for a response from me in the ntfy app
-def wait_for_stop_signal(topic, stop_message:str, continue_message:str) -> bool:
+def wait_for_stop_signal(topic, stop_message: str, continue_message: str,
+                         max_retries: int = 5, backoff_seconds: float = 5.0) -> bool:
     """
     Listens to the ntfy topic and returns False for 'stopp' or True for any other command.
+
+    Network errors are retried with exponential backoff. If all retries are exhausted,
+    we treat that as a stop (so the model gets saved) but log the failure loudly so the
+    user knows training ended due to connectivity, not an explicit stop.
     """
     print(f"Waiting for remote 'Stopp' command on topic: {topic}...")
     url = f"https://ntfy.sh/{topic}/json"
-    
-    try:
-        # stream=True keeps the connection open to wait for new messages
-        with requests.get(url, stream=True) as response:
-            for line in response.iter_lines():
-                if line:
-                    data = json.loads(line)
-                    
-                    # only filter out real messages (events)
-                    if data.get("event") == "message":
-                        message_content = data.get("message", "").strip()
-                        print(f"Received: '{message_content}'")
-                        
-                        if message_content.lower() == "stopp":
-                            print("Stop signal received. Terminating script...\n")
-                            send_notification(topic=topic, message=stop_message, title="Stopping!")
-                            return False
-                        else:
-                            print("Continuing signal received. Continuing script...\n")
-                            send_notification(topic=topic, message=continue_message, title="Continuing!")
-                            return True
-    except Exception as e:
-        print(f"An error occurred while listening: {e}")
 
-    # default to stop if no valid message was received
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            with requests.get(url, stream=True, timeout=(10, None)) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("event") != "message":
+                        continue
+
+                    message_content = data.get("message", "").strip()
+                    print(f"Received: '{message_content}'")
+
+                    if message_content.lower() == "stopp":
+                        print("Stop signal received. Terminating script...\n")
+                        send_notification(topic=topic, message=stop_message, title="Stopping!")
+                        return False
+
+                    print("Continuing signal received. Continuing script...\n")
+                    send_notification(topic=topic, message=continue_message, title="Continuing!")
+                    return True
+
+            # Stream ended without a message — retry.
+            print("[ntfy] stream ended without a message, reconnecting...")
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
+            attempt += 1
+            wait = backoff_seconds * (2 ** (attempt - 1))
+            print(f"[ntfy] connection error ({e}); retry {attempt}/{max_retries} in {wait:.1f}s")
+            time.sleep(wait)
+        except json.JSONDecodeError as e:
+            print(f"[ntfy] malformed message ignored: {e}")
+            continue
+
+    print(f"[ntfy] !!! could not reach ntfy after {max_retries} attempts — defaulting to STOP so the model is saved.\n")
     return False
 
 
-# Plot 5 random image from a dataloader
-def plot_dataloader_images(dataloader, class_names, n=5):
+# Plot n random images from a dataloader
+def plot_dataloader_images(dataloader, class_names, n=5, mean=IMAGENET_MEAN, std=IMAGENET_STD):
     """
     Plots the first n images from a DataLoader batch.
+
+    mean/std default to ImageNet values; pass the actual normalization values used by
+    your transforms if they differ, otherwise the preview will look off.
     """
-    # 1. Einen Batch holen
     images, labels = next(iter(dataloader))
-    
-    # 2. Plot erstellen
+
+    mean = np.asarray(mean)
+    std = np.asarray(std)
+
     plt.figure(figsize=(15, 5))
-    
+
     for i in range(n):
-        if i >= len(images): break
-        
-        # Bild von Tensor (C, H, W) zu NumPy (H, W, C) konvertieren
+        if i >= len(images):
+            break
+
         img = images[i].permute(1, 2, 0).cpu().numpy()
-        
-        # Normalisierung rückgängig machen (für ImageNet Werte)
-        mean = np.array([0.485, 0.456, 0.406])
-        std = np.array([0.229, 0.224, 0.225])
         img = std * img + mean
-        img = np.clip(img, 0, 1) # Werte auf [0, 1] begrenzen
-        
-        # Subplot hinzufügen
+        img = np.clip(img, 0, 1)
+
         plt.subplot(1, n, i+1)
         plt.imshow(img)
         plt.title(f"Label: {class_names[labels[i]]}")
         plt.axis("off")
-    
+
     plt.tight_layout()
     plt.show()

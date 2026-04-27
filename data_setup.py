@@ -49,66 +49,46 @@ def create_image_dataloaders(
         model_weights=None,
         batch_size:int = 1,
         num_workers:int = cpu_count()):
-    
+
     print("----------- Creating dataloaders -----------\n")
     print("Searching for train, test and val directory...")
-    # Get the train and test dir
+    if model_weights is None:
+        raise ValueError("model_weights is required so the dataloader transforms match the pretrained model.")
+
     train_dir = f"{data_path}/train"
     test_dir = f"{data_path}/test"
-
-    # Create val path, to check for existence
     val_dir_path = Path(f"{data_path}/val")
-
-    # Check if val path exists
     val_dir_exists = val_dir_path.exists()
 
-    # Create transforms
-    test_transform = model_weights.transforms()
-
+    eval_transform = model_weights.transforms()
 
     if use_data_augmentation:
         train_transform = transforms.Compose([
-            # Step 1: Augment the image
             transforms.TrivialAugmentWide(),
-            # Step 2: Standard conversion and normalization
-            model_weights.transforms()
+            eval_transform,
         ])
     else:
-        train_transform = test_transform
-    
+        train_transform = eval_transform
 
-    # Create train and test dataset
     print("Creating datasets...")
     train_dataset = ImageFolder(root=train_dir, transform=train_transform)
-    test_dataset = ImageFolder(root=test_dir, transform=test_transform)
-    
-    if val_dir_exists:
-        print("Val path detected! Creating val dataset...")
-        val_dir = f"{data_path}/val"
-        val_dataset = ImageFolder(root=val_dir, transform=test_transform)
+    test_dataset = ImageFolder(root=test_dir, transform=eval_transform)
+    val_dataset = ImageFolder(root=str(val_dir_path), transform=eval_transform) if val_dir_exists else None
 
-    # Get the class names
     class_names = train_dataset.classes
 
-    # Create the dataloader
     print(f"Creating dataloaders with a batch size of {batch_size} image(s) and {num_workers} workers...")
     train_dataloader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     test_dataloader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    val_dataloader = DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True) if val_dataset is not None else None
 
-    if val_dir_exists:
-        val_dataloader = DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-
-    # Get batch shape
     single_img_shape = train_dataset[0][0].shape
     batch_shape = (train_dataloader.batch_size, *single_img_shape)
 
-    # return everything
-    if val_dir_exists:
-        print(f"DataLoaders successfully created! Image batch shape: {batch_shape} | Length of train_dataloader: {len(train_dataloader)} batches | Length of test_dataloader: {len(test_dataloader)} batches | Length of val_dataloader: {len(val_dataloader)} batches\n")
-        return train_dataloader, test_dataloader, val_dataloader, class_names
-    else:
-        print(f"DataLoaders successfully created! Image batch shape: {batch_shape} | Length of train_dataloader: {len(train_dataloader)} batches | Length of test_dataloader: {len(test_dataloader)} batches\n")
-        return train_dataloader, test_dataloader, class_names
+    val_msg = f" | Length of val_dataloader: {len(val_dataloader)} batches" if val_dataloader is not None else " | No val_dataloader (no val/ directory found)"
+    print(f"DataLoaders successfully created! Image batch shape: {batch_shape} | Length of train_dataloader: {len(train_dataloader)} batches | Length of test_dataloader: {len(test_dataloader)} batches{val_msg}\n")
+
+    return train_dataloader, test_dataloader, val_dataloader, class_names
     
     
 

@@ -1,0 +1,33 @@
+# Trained model checkpoints (large binaries)
+models/
+
+# TensorBoard logs
+runs/
+
+# Training data
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets / local config
+.env
+.claude/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
